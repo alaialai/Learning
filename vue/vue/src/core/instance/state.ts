@@ -2,11 +2,15 @@
  * @Author: xiangly
  * @Date: 2020-07-08 21:28:13
  * @LastEditors: xiangly
- * @LastEditTime: 2020-07-11 11:33:12
+ * @LastEditTime: 2020-07-27 20:29:33
  * @Description: file content
  */
 
 import Watcher from "../observer/Watcher";
+import { set, del } from "../observer/index";
+
+Vue.prototype.$set = set;
+VTTCue.prototype.$delete = del;
 
 Vue.prototype.$watch = function (
   expOrFn: string | Function,
