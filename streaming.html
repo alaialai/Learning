@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vue2 流式 Widget 渲染 · 无闪烁版（直接 DOM 操作）</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.7.16/dist/vue.js"></script>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          sans-serif;
+        background: #f0f2f5;
+        margin: 0;
+        padding: 24px;
+      }
+      .demo-container {
+        max-width: 1300px;
+        margin: 0 auto;
+        background: white;
+        border-radius: 20px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+        overflow: hidden;
+      }
+      .header {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        color: white;
+        padding: 20px 28px;
+      }
+      .header h1 {
+        margin: 0 0 6px 0;
+        font-size: 24px;
+      }
+      .header p {
+        margin: 0;
+        opacity: 0.8;
+        font-size: 13px;
+      }
+      .toolbar {
+        padding: 16px 24px;
+        background: #f8fafc;
+        border-bottom: 1px solid #e2e8f0;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      button {
+        background: #3b82f6;
+        color: white;
+        border: none;
+        padding: 8px 20px;
+        border-radius: 40px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      button:hover:not(:disabled) {
+        background: #2563eb;
+        transform: translateY(-1px);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .reset-btn {
+        background: #64748b;
+      }
+      .reset-btn:hover:not(:disabled) {
+        background: #475569;
+      }
+      .status {
+        background: #e2e8f0;
+        padding: 6px 16px;
+        border-radius: 40px;
+        font-size: 13px;
+        font-family: monospace;
+      }
+      .status.streaming {
+        background: #fef3c7;
+        color: #b45309;
+        border: 1px solid #fde68a;
+      }
+      .stats {
+        margin-left: auto;
+        font-size: 12px;
+        color: #64748b;
+        font-family: monospace;
+      }
+      .split-pane {
+        display: flex;
+        flex-wrap: wrap;
+      }
+      .debug-panel {
+        flex: 1;
+        min-width: 320px;
+        border-right: 1px solid #e2e8f0;
+        background: #fefcf7;
+      }
+      .render-panel {
+        flex: 1;
+        min-width: 320px;
+        background: white;
+      }
+      .panel-title {
+        padding: 12px 20px;
+        font-size: 13px;
+        font-weight: 600;
+        background: #f1f5f9;
+        border-bottom: 1px solid #e2e8f0;
+      }
+      .panel-content {
+        padding: 20px;
+        max-height: 500px;
+        overflow: auto;
+      }
+      .raw-buffer {
+        background: #1e293b;
+        color: #94a3b8;
+        font-family: monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-all;
+        padding: 14px;
+        border-radius: 12px;
+      }
+      .tag-stack {
+        background: #f1f5f9;
+        padding: 12px;
+        border-radius: 12px;
+        margin-top: 16px;
+        font-size: 12px;
+      }
+      .tag-stack span {
+        display: inline-block;
+        background: #3b82f6;
+        color: white;
+        padding: 4px 10px;
+        border-radius: 20px;
+        margin: 3px;
+      }
+      iframe {
+        width: 100%;
+        min-height: 450px;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        background: white;
+      }
+      .info-note {
+        background: #eef2ff;
+        border-top: 1px solid #c7d2fe;
+        padding: 14px 24px;
+        font-size: 13px;
+        color: #1e40af;
+      }
+      code {
+        background: #dbeafe;
+        padding: 2px 6px;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="demo-container">
+        <div class="header">
+          <h1>🎯 Vue2 无闪烁流式渲染</h1>
+          <p>直接操作 iframe DOM 替代 srcdoc 绑定 | 零闪烁平滑更新</p>
+        </div>
+
+        <div class="toolbar">
+          <button @click="startStreaming" :disabled="isStreaming">
+            🚀 模拟流式输出
+          </button>
+          <button
+            class="reset-btn"
+            @click="resetStream"
+            :disabled="isStreaming"
+          >
+            🔄 重置
+          </button>
+          <div class="status" :class="{ streaming: isStreaming }">
+            {{ isStreaming ? '⚡ 流式传输中...' : '⏸ 就绪' }}
+          </div>
+          <div class="stats">
+            📦 {{ rawBuffer.length }} 字符 | ✅ {{ safeHtml.length }} 字符 | 📚
+            栈深度 {{ tagStack.length }}
+          </div>
+        </div>
+
+        <div class="split-pane">
+          <div class="debug-panel">
+            <div class="panel-title">📥 原始缓冲区（含不完整标签）</div>
+            <div class="panel-content">
+              <pre class="raw-buffer">{{ rawBuffer || '等待数据...' }}</pre>
+
+              <div class="tag-stack">
+                <strong>🔖 未闭合标签栈:</strong>
+                <div style="margin-top: 8px">
+                  <span v-for="tag in tagStack" :key="tag">{{ tag }}</span>
+                  <span v-if="tagStack.length === 0" style="background: #94a3b8"
+                    >（无）</span
+                  >
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="render-panel">
+            <div class="panel-title">🎨 实时渲染（直接 DOM 操作 · 无闪烁）</div>
+            <div class="panel-content">
+              <iframe
+                ref="previewIframe"
+                title="widget-preview"
+                style="width: 100%; min-height: 450px; border: none"
+              ></iframe>
+            </div>
+          </div>
+        </div>
+
+        <div class="info-note">
+          💡 <strong>防闪烁核心：</strong> 不使用
+          <code>:srcdoc</code> 响应式绑定，改用 <code>ref</code> 获取 iframe
+          实例，通过 <code>iframe.contentDocument.write()</code> 直接写入
+          HTML，<strong>不会触发页面刷新</strong>，完全消除闪烁。
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // ============================================================
+      // 工具函数：标签栈解析（安全截断 HTML）
+      // ============================================================
+      function getSafeHTML(htmlBuffer) {
+        if (!htmlBuffer) return "";
+
+        const tagStack = [];
+        let lastSafeIndex = 0;
+        const tagRegex = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>/g;
+        let match;
+
+        const voidElements = new Set([
+          "area",
+          "base",
+          "br",
+          "col",
+          "embed",
+          "hr",
+          "img",
+          "input",
+          "link",
+          "meta",
+          "param",
+          "source",
+          "track",
+          "wbr",
+        ]);
+
+        while ((match = tagRegex.exec(htmlBuffer)) !== null) {
+          const isClosing = match[1] === "/";
+          const tagName = match[2].toLowerCase();
+          const fullTag = match[0];
+          const tagEnd = match.index + fullTag.length;
+
+          const isSelfClosing =
+            fullTag.endsWith("/>") || voidElements.has(tagName);
+
+          if (isClosing) {
+            if (
+              tagStack.length > 0 &&
+              tagStack[tagStack.length - 1] === tagName
+            ) {
+              tagStack.pop();
+              lastSafeIndex = tagEnd;
+            }
+          } else if (!isSelfClosing) {
+            tagStack.push(tagName);
+            lastSafeIndex = tagEnd;
+          } else {
+            lastSafeIndex = tagEnd;
+          }
+        }
+
+        return htmlBuffer.substring(0, lastSafeIndex);
+      }
+
+      // ============================================================
+      // 从原始缓冲区中提取 widget_code
+      // ============================================================
+      function extractWidgetCodeFromBuffer(buffer) {
+        if (!buffer) return null;
+
+        const matches = [...buffer.matchAll(/`{1,3}show-widget/g)];
+        if (matches.length === 0) return null;
+
+        const lastMatch = matches[matches.length - 1];
+        const afterMarker = buffer.slice(lastMatch.index);
+
+        const jsonStart = afterMarker.indexOf("{");
+        if (jsonStart === -1) return null;
+
+        const jsonPart = afterMarker.slice(jsonStart);
+        const keyIdx = jsonPart.indexOf('"widget_code"');
+        if (keyIdx === -1) return null;
+
+        const colonIdx = jsonPart.indexOf(":", keyIdx + 13);
+        if (colonIdx === -1) return null;
+
+        const quoteIdx = jsonPart.indexOf('"', colonIdx + 1);
+        if (quoteIdx === -1) return null;
+
+        let raw = jsonPart.slice(quoteIdx + 1);
+        raw = raw.replace(/"\s*\}\s*$/, "");
+        if (raw.endsWith("\\")) raw = raw.slice(0, -1);
+
+        try {
+          let decoded = raw
+            .replace(/\\\\/g, "\x00BACKSLASH\x00")
+            .replace(/\\n/g, "\n")
+            .replace(/\\t/g, "\t")
+            .replace(/\\r/g, "\r")
+            .replace(/\\"/g, '"')
+            .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+              String.fromCharCode(parseInt(hex, 16))
+            )
+            .replace(/\x00BACKSLASH\x00/g, "\\");
+          return decoded;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      // ============================================================
+      // 模拟 AI 流式输出的数据块
+      // ============================================================
+      const STREAM_CHUNKS = [
+        'Here is a widget:\n\n```show-widget\n{\n  "title": "动态卡片",\n  "widget_code": "<div style=\\"border-radius: 16px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px;\\">',
+        "<h3>✨ 无闪烁渲染</h3>",
+        "<p>通过 <code>document.write()</code> 直接写入，<strong>iframe 不刷新</strong></p>",
+        '<progress value="65" max="100" style="width: 100%;"></progress>',
+        '<div style="text-align: center; margin-top: 16px;">⚡ 实时更新</div>',
+        '</div>"\n}\n```\n\nDone!',
+      ];
+
+      // 拆细模拟流式
+      const FINAL_CHUNKS = [];
+      for (const chunk of STREAM_CHUNKS) {
+        if (chunk.length > 25) {
+          const mid = Math.floor(chunk.length / 2);
+          FINAL_CHUNKS.push(chunk.slice(0, mid));
+          FINAL_CHUNKS.push(chunk.slice(mid));
+        } else {
+          FINAL_CHUNKS.push(chunk);
+        }
+      }
+
+      new Vue({
+        el: "#app",
+        data: {
+          isStreaming: false,
+          streamTimer: null,
+          chunkIndex: 0,
+          rawBuffer: "",
+          safeHtml: "",
+          tagStack: [],
+        },
+        mounted() {
+          // 初始化 iframe 空白页
+          this.updateIframe(
+            '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:system-ui;padding:40px;text-align:center;color:#94a3b8;}</style></head><body>✨ 等待流式数据...</body></html>'
+          );
+        },
+        methods: {
+          /**
+           * 核心方法：直接操作 iframe DOM 更新内容（无闪烁）
+           */
+          updateIframe(html) {
+            const iframe = this.$refs.previewIframe;
+            if (!iframe) return;
+
+            try {
+              const doc =
+                iframe.contentDocument || iframe.contentWindow.document;
+              doc.open();
+              doc.write(html);
+              doc.close();
+            } catch (e) {
+              console.warn("iframe 写入失败:", e);
+            }
+          },
+
+          startStreaming() {
+            if (this.isStreaming) return;
+            this.resetStream();
+            this.isStreaming = true;
+            this.chunkIndex = 0;
+
+            this.streamTimer = setInterval(() => {
+              if (this.chunkIndex >= FINAL_CHUNKS.length) {
+                clearInterval(this.streamTimer);
+                this.streamTimer = null;
+                this.isStreaming = false;
+                console.log("流式完成");
+                return;
+              }
+
+              this.rawBuffer += FINAL_CHUNKS[this.chunkIndex];
+              this.processBuffer();
+              this.chunkIndex++;
+            }, 40);
+          },
+
+          processBuffer() {
+            const buffer = this.rawBuffer;
+            const hasWidgetFence = /`{1,3}show-widget/.test(buffer);
+
+            if (hasWidgetFence && this.isStreaming) {
+              // 检查 JSON 是否完整（括号匹配）
+              const matches = [...buffer.matchAll(/`{1,3}show-widget/g)];
+              const lastMatch = matches[matches.length - 1];
+              const afterLastFence = buffer.slice(lastMatch.index);
+
+              let isJSONClosed = false;
+              const jsonStart = afterLastFence.indexOf("{");
+              if (jsonStart !== -1) {
+                let depth = 0,
+                  inString = false,
+                  escaped = false;
+                for (let i = jsonStart; i < afterLastFence.length; i++) {
+                  const ch = afterLastFence[i];
+                  if (escaped) {
+                    escaped = false;
+                    continue;
+                  }
+                  if (ch === "\\" && inString) {
+                    escaped = true;
+                    continue;
+                  }
+                  if (ch === '"') {
+                    inString = !inString;
+                    continue;
+                  }
+                  if (inString) continue;
+                  if (ch === "{") depth++;
+                  if (ch === "}") {
+                    depth--;
+                    if (depth === 0) {
+                      isJSONClosed = true;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              if (isJSONClosed) {
+                const widgetCode = extractWidgetCodeFromBuffer(buffer);
+                if (widgetCode) {
+                  this.safeHtml = getSafeHTML(widgetCode);
+                } else {
+                  this.safeHtml = getSafeHTML(buffer);
+                }
+              } else {
+                const partialCode = extractWidgetCodeFromBuffer(buffer);
+                if (partialCode && partialCode.length > 10) {
+                  this.safeHtml = getSafeHTML(partialCode);
+                } else {
+                  this.safeHtml = "";
+                }
+              }
+            } else {
+              this.safeHtml = getSafeHTML(buffer);
+            }
+
+            // 更新标签栈（调试用）
+            this.updateTagStack(this.safeHtml);
+
+            // 🔥 关键：直接写入 iframe，不经过 Vue 响应式绑定 → 无闪烁
+            if (this.safeHtml) {
+              const fullHtml = `<!DOCTYPE html>
+                <html>
+                <head><meta charset="UTF-8"><style>body{font-family:system-ui;padding:16px;}</style></head>
+                <body>${this.safeHtml}</body>
+                </html>`;
+              this.updateIframe(fullHtml);
+            }
+          },
+
+          updateTagStack(html) {
+            if (!html) {
+              this.tagStack = [];
+              return;
+            }
+            const stack = [];
+            const tagRegex = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*>/g;
+            const voidElements = new Set(["br", "hr", "img", "input"]);
+            let match;
+            while ((match = tagRegex.exec(html)) !== null) {
+              const isClosing = match[1] === "/";
+              const tagName = match[2].toLowerCase();
+              const isSelfClosing =
+                match[0].endsWith("/>") || voidElements.has(tagName);
+              if (isClosing) {
+                if (stack.length && stack[stack.length - 1] === tagName)
+                  stack.pop();
+              } else if (!isSelfClosing) {
+                stack.push(tagName);
+              }
+            }
+            this.tagStack = stack;
+          },
+
+          resetStream() {
+            if (this.streamTimer) {
+              clearInterval(this.streamTimer);
+              this.streamTimer = null;
+            }
+            this.isStreaming = false;
+            this.chunkIndex = 0;
+            this.rawBuffer = "";
+            this.safeHtml = "";
+            this.tagStack = [];
+            this.updateIframe(
+              '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:system-ui;padding:40px;text-align:center;color:#94a3b8;}</style></head><body>✨ 等待流式数据...</body></html>'
+            );
+          },
+        },
+        beforeDestroy() {
+          if (this.streamTimer) clearInterval(this.streamTimer);
+        },
+      });
+    </script>
+  </body>
+</html>
